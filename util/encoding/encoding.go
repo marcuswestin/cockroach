@@ -27,22 +27,22 @@ import (
 	"github.com/cockroachdb/cockroach/util"
 )
 
-// EncodeUint32 encodes the uint32 value using a big-endian 8 byte
-// representation. The bytes are appended to the supplied buffer and
-// the final buffer is returned.
+// EncodeUint32 encodes the uint32 value using a big-endian 4 byte
+// representation. The bytes are appended to the supplied buffer and the final
+// buffer is returned.
 func EncodeUint32(b []byte, v uint32) []byte {
 	return append(b, byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
 
-// EncodeUint32Decreasing encodes the uint32 value so that it sorts in
-// reverse order, from largest to smallest.
+// EncodeUint32Decreasing encodes the uint32 value so that it sorts in reverse
+// order, from largest to smallest.
 func EncodeUint32Decreasing(b []byte, v uint32) []byte {
 	return EncodeUint32(b, ^v)
 }
 
-// DecodeUint32 decodes a uint32 from the input buffer, treating
-// the input as a big-endian 4 byte uint32 representation. The remainder
-// of the input buffer and the decoded uint32 are returned.
+// DecodeUint32 decodes a uint32 from the input buffer, treating the input as a
+// big-endian 4 byte uint32 representation. The remainder of the input buffer
+// and the decoded uint32 are returned.
 func DecodeUint32(b []byte) ([]byte, uint32, error) {
 	if len(b) < 4 {
 		return nil, 0, util.Errorf("insufficient bytes to decode uint32 int value")
@@ -52,31 +52,31 @@ func DecodeUint32(b []byte) ([]byte, uint32, error) {
 	return b[4:], v, nil
 }
 
-// DecodeUint32Decreasing decodes a uint32 value which was encoded
-// using EncodeUint32Decreasing.
+// DecodeUint32Decreasing decodes a uint32 value which was encoded using
+// EncodeUint32Decreasing.
 func DecodeUint32Decreasing(b []byte) ([]byte, uint32, error) {
 	leftover, v, err := DecodeUint32(b)
 	return leftover, ^v, err
 }
 
 // EncodeUint64 encodes the uint64 value using a big-endian 8 byte
-// representation. The bytes are appended to the supplied buffer and
-// the final buffer is returned.
+// representation. The bytes are appended to the supplied buffer and the final
+// buffer is returned.
 func EncodeUint64(b []byte, v uint64) []byte {
 	return append(b,
 		byte(v>>56), byte(v>>48), byte(v>>40), byte(v>>32),
 		byte(v>>24), byte(v>>16), byte(v>>8), byte(v))
 }
 
-// EncodeUint64Decreasing encodes the uint64 value so that it sorts in
-// reverse order, from largest to smallest.
+// EncodeUint64Decreasing encodes the uint64 value so that it sorts in reverse
+// order, from largest to smallest.
 func EncodeUint64Decreasing(b []byte, v uint64) []byte {
 	return EncodeUint64(b, ^v)
 }
 
-// DecodeUint64 decodes a uint64 from the input buffer, treating
-// the input as a big-endian 8 byte uint64 representation. The remainder
-// of the input buffer and the decoded uint64 are returned.
+// DecodeUint64 decodes a uint64 from the input buffer, treating the input as a
+// big-endian 8 byte uint64 representation. The remainder of the input buffer
+// and the decoded uint64 are returned.
 func DecodeUint64(b []byte) ([]byte, uint64, error) {
 	if len(b) < 8 {
 		return nil, 0, util.Errorf("insufficient bytes to decode uint64 int value")
@@ -88,8 +88,8 @@ func DecodeUint64(b []byte) ([]byte, uint64, error) {
 	return b[8:], v, nil
 }
 
-// DecodeUint64Decreasing decodes a uint64 value which was encoded
-// using EncodeUint64Decreasing.
+// DecodeUint64Decreasing decodes a uint64 value which was encoded using
+// EncodeUint64Decreasing.
 func DecodeUint64Decreasing(b []byte) ([]byte, uint64, error) {
 	leftover, v, err := DecodeUint64(b)
 	return leftover, ^v, err
@@ -100,11 +100,10 @@ const intMid = intMin + 8
 const intMax = intMid + 8
 
 // EncodeVarint encodes the int64 value using a variable length
-// (length-prefixed) representation. The length is encoded as a single
-// byte. If the value to be encoded is negative the length is encoded
-// as 8-numBytes. If the value is positive it is encoded as
-// 8+numBytes. The encoded bytes are appended to the supplied buffer
-// and the final buffer is returned.
+// (length-prefixed) representation. The length is encoded as a single byte. If
+// the value to be encoded is negative the length is encoded as 8-numBytes. If
+// the value is positive it is encoded as 8+numBytes. The encoded bytes are
+// appended to the supplied buffer and the final buffer is returned.
 func EncodeVarint(b []byte, v int64) []byte {
 	if v < 0 {
 		switch {
@@ -134,15 +133,14 @@ func EncodeVarint(b []byte, v int64) []byte {
 	return EncodeUvarint(b, uint64(v))
 }
 
-// EncodeVarintDecreasing encodes the uint64 value so that it sorts in
-// reverse order, from largest to smallest.
+// EncodeVarintDecreasing encodes the uint64 value so that it sorts in reverse
+// order, from largest to smallest.
 func EncodeVarintDecreasing(b []byte, v int64) []byte {
 	return EncodeVarint(b, ^v)
 }
 
-// DecodeVarint decodes a varint encoded int64 from the input
-// buffer. The remainder of the input buffer and the decoded int64
-// are returned.
+// DecodeVarint decodes a varint encoded int64 from the input buffer. The
+// remainder of the input buffer and the decoded int64 are returned.
 func DecodeVarint(b []byte) ([]byte, int64, error) {
 	if len(b) == 0 {
 		return nil, 0, util.Errorf("insufficient bytes to decode var uint64 int value")
@@ -174,18 +172,18 @@ func DecodeVarint(b []byte) ([]byte, int64, error) {
 	return remB, int64(v), nil
 }
 
-// DecodeVarintDecreasing decodes a uint64 value which was encoded
-// using EncodeVarintDecreasing.
+// DecodeVarintDecreasing decodes a uint64 value which was encoded using
+// EncodeVarintDecreasing.
 func DecodeVarintDecreasing(b []byte) ([]byte, int64, error) {
 	leftover, v, err := DecodeVarint(b)
 	return leftover, ^v, err
 }
 
 // EncodeUvarint encodes the uint64 value using a variable length
-// (length-prefixed) representation. The length is encoded as a single
-// byte indicating the number of encoded bytes (-8) to follow. See
-// EncodeVarint for rationale. The encoded bytes are appended to the
-// supplied buffer and the final buffer is returned.
+// (length-prefixed) representation. The length is encoded as a single byte
+// indicating the number of encoded bytes (-8) to follow. See EncodeVarint for
+// rationale. The encoded bytes are appended to the supplied buffer and the
+// final buffer is returned.
 func EncodeUvarint(b []byte, v uint64) []byte {
 	switch {
 	case v == 0:
@@ -213,8 +211,8 @@ func EncodeUvarint(b []byte, v uint64) []byte {
 	}
 }
 
-// EncodeUvarintDecreasing encodes the uint64 value so that it sorts in
-// reverse order, from largest to smallest.
+// EncodeUvarintDecreasing encodes the uint64 value so that it sorts in reverse
+// order, from largest to smallest.
 func EncodeUvarintDecreasing(b []byte, v uint64) []byte {
 	switch {
 	case v == 0:
@@ -250,9 +248,8 @@ func EncodeUvarintDecreasing(b []byte, v uint64) []byte {
 	}
 }
 
-// DecodeUvarint decodes a varint encoded uint64 from the input
-// buffer. The remainder of the input buffer and the decoded uint64
-// are returned.
+// DecodeUvarint decodes a varint encoded uint64 from the input buffer. The
+// remainder of the input buffer and the decoded uint64 are returned.
 func DecodeUvarint(b []byte) ([]byte, uint64, error) {
 	if len(b) == 0 {
 		return nil, 0, util.Errorf("insufficient bytes to decode var uint64 int value")
@@ -273,8 +270,8 @@ func DecodeUvarint(b []byte) ([]byte, uint64, error) {
 	return b[length:], v, nil
 }
 
-// DecodeUvarintDecreasing decodes a uint64 value which was encoded
-// using EncodeUvarintDecreasing.
+// DecodeUvarintDecreasing decodes a uint64 value which was encoded using
+// EncodeUvarintDecreasing.
 func DecodeUvarintDecreasing(b []byte) ([]byte, uint64, error) {
 	if len(b) == 0 {
 		return nil, 0, util.Errorf("insufficient bytes to decode var uint64 int value")
@@ -317,11 +314,10 @@ var (
 	descendingEscapes = escapes{^escape, ^escapedTerm, ^escaped00, ^escapedFF, ^bytesMarker}
 )
 
-// EncodeBytes encodes the []byte value using an escape-based
-// encoding. The encoded value is terminated with the sequence
-// "\x00\x01" which is guaranteed to not occur elsewhere in the
-// encoded value. The encoded bytes are append to the supplied buffer
-// and the resulting buffer is returned.
+// EncodeBytes encodes the []byte value using an escape-based encoding. The
+// encoded value is terminated with the sequence "\x00\x01" which is guaranteed
+// to not occur elsewhere in the encoded value. The encoded bytes are appended
+// to the supplied buffer and the resulting buffer is returned.
 func EncodeBytes(b []byte, data []byte) []byte {
 	b = append(b, bytesMarker)
 	for {
@@ -339,10 +335,9 @@ func EncodeBytes(b []byte, data []byte) []byte {
 	return append(b, escape, escapedTerm)
 }
 
-// EncodeBytesDecreasing encodes the []byte value using an
-// escape-based encoding and then inverts (ones complement) the result
-// so that it sorts in reverse order, from larger to smaller
-// lexicographically.
+// EncodeBytesDecreasing encodes the []byte value using an escape-based
+// encoding and then inverts (ones complement) the result so that it sorts in
+// reverse order, from larger to smaller lexicographically.
 func EncodeBytesDecreasing(b []byte, data []byte) []byte {
 	n := len(b)
 	b = EncodeBytes(b, data)
@@ -393,10 +388,9 @@ func DecodeBytes(b []byte, r []byte) ([]byte, []byte, error) {
 	return decodeBytes(b, r, ascendingEscapes)
 }
 
-// DecodeBytesDecreasing decodes a []byte value from the input buffer
-// which was encoded using EncodeBytesDecreasing. The decoded bytes
-// are appended to r. The remainder of the input buffer and the
-// decoded []byte are returned.
+// DecodeBytesDecreasing decodes a []byte value from the input buffer which was
+// encoded using EncodeBytesDecreasing. The decoded bytes are appended to
+// r. The remainder of the input buffer and the decoded []byte are returned.
 func DecodeBytesDecreasing(b []byte, r []byte) ([]byte, []byte, error) {
 	if r == nil {
 		r = []byte{}

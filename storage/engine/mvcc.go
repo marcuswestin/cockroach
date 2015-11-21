@@ -482,6 +482,14 @@ func MVCCGet(engine Engine, key roachpb.Key, timestamp roachpb.Timestamp, consis
 		return nil, nil, emptyKeyError()
 	}
 
+	// type mvccGetter interface {
+	// 	MVCCGet(key roachpb.Key, timestamp roachpb.Timestamp, consistent bool,
+	// 		txn *roachpb.Transaction) (*roachpb.Value, []roachpb.Intent, error)
+	// }
+	// if g, ok := engine.(mvccGetter); ok {
+	// 	return g.MVCCGet(key, timestamp, consistent, txn)
+	// }
+
 	// Create a function which scans for the first key between start and end keys.
 	getValue := func(engine Engine, start, end MVCCKey,
 		msg proto.Message) (MVCCKey, error) {

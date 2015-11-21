@@ -52,7 +52,7 @@ struct DBEngine {
   virtual DBStatus Delete(DBSlice key) = 0;
   virtual DBStatus WriteBatch() = 0;
   virtual DBStatus Get(DBSlice key, DBString* value) = 0;
-  virtual DBIterator* NewIter() = 0;
+  virtual rocksdb::Iterator* NewIter() = 0;
 };
 
 struct DBImpl : public DBEngine {
@@ -76,7 +76,7 @@ struct DBImpl : public DBEngine {
   virtual DBStatus Delete(DBSlice key);
   virtual DBStatus WriteBatch();
   virtual DBStatus Get(DBSlice key, DBString* value);
-  virtual DBIterator* NewIter();
+  virtual rocksdb::Iterator* NewIter();
 };
 
 struct DBBatch : public DBEngine {
@@ -96,7 +96,7 @@ struct DBBatch : public DBEngine {
   virtual DBStatus Delete(DBSlice key);
   virtual DBStatus WriteBatch();
   virtual DBStatus Get(DBSlice key, DBString* value);
-  virtual DBIterator* NewIter();
+  virtual rocksdb::Iterator* NewIter();
 };
 
 struct DBSnapshot : public DBEngine {
@@ -117,7 +117,7 @@ struct DBSnapshot : public DBEngine {
   virtual DBStatus Delete(DBSlice key);
   virtual DBStatus WriteBatch();
   virtual DBStatus Get(DBSlice key, DBString* value);
-  virtual DBIterator* NewIter();
+  virtual rocksdb::Iterator* NewIter();
 };
 
 struct DBIterator {
@@ -1074,13 +1074,110 @@ class BaseDeltaIterator : public rocksdb::Iterator {
   const rocksdb::Comparator* comparator_;  // not owned
 };
 
+struct Timestamp : public MVCCTimestamp {
+  Timestamp(int64_t w, int32_t l) {
+    wall_time = w;
+    logical = l;
+  }
+  Timestamp(const MVCCTimestamp& t)
+      : MVCCTimestamp(t) {
+  }
+  Timestamp(const cockroach::roachpb::Timestamp& t) {
+    wall_time = t.wall_time();
+    logical = t.logical();
+  }
+
+  Timestamp Next() const {
+    if (logical == std::numeric_limits<int32_t>::max()) {
+      return Timestamp(wall_time + 1, 0);
+    }
+    return Timestamp(wall_time, logical + 1);
+  }
+
+  Timestamp Prev() const {
+    if (logical > 0) {
+      return Timestamp(wall_time, logical - 1);
+    }
+    return Timestamp(wall_time - 1, std::numeric_limits<int32_t>::max());
+  }
+
+  bool IsZero() const {
+    return wall_time == 0 && logical == 0;
+  }
+};
+
+bool operator==(const Timestamp& a, const Timestamp& b) {
+  return a.wall_time == b.wall_time && a.logical == b.logical;
+}
+
+bool operator<(const Timestamp& a, const Timestamp& b) {
+  return a.wall_time < b.wall_time ||
+      (a.wall_time == b.wall_time && a.logical < b.logical);
+}
+
+bool operator>=(const Timestamp& a, const Timestamp& b) {
+  return !(a < b);
+}
+
+void KeyNext(std::string *key) {
+  key->push_back('\0');
+}
+
+bool IsIntentOf(cockroach::storage::engine::MVCCMetadata* meta, MVCCTxn* txn) {
+  return meta->has_txn() && txn->id.len != 0 && meta->txn().id() == ToSlice(txn->id);
+}
+
+std::pair<int, int> AppendProto(std::string* buf, const google::protobuf::Message& m) {
+  int b = buf->size();
+  m.AppendToString(buf);
+  return std::make_pair(b, buf->size());
+}
+
+DBSlice DBSliceSubstr(DBString str, std::pair<int, int> info) {
+  DBSlice s = ToDBSlice(str);
+  s.data += info.first;
+  s.len = std::min<int>(s.len - info.first, info.second - info.first);
+  return s;
+}
+
+void MVCCEncodeTimestamp(std::string* buf, const Timestamp& ts) {
+  EncodeUint64Decreasing(buf, uint64_t(ts.wall_time));
+  EncodeUint32Decreasing(buf, uint32_t(ts.logical));
+}
+
+const int mvcc_version_timestamp_size = 12;
+
+DBStatus MVCCDecodeKey(rocksdb::Slice encodedKey, std::string* key, Timestamp* ts) {
+  *ts = Timestamp(0, 0);
+  if (!DecodeBytes(&encodedKey, key)) {
+    return FmtStatus("unable to decode key");
+  }
+  if (encodedKey.size() == 0) {
+    return kSuccess;
+  }
+  if (encodedKey.size() != mvcc_version_timestamp_size) {
+    return FmtStatus("there should be %d bytes for encoded timestamp, found %d",
+                     mvcc_version_timestamp_size, encodedKey.size());
+  }
+  uint64_t wall_time;
+  if (!DecodeUint64Decreasing(&encodedKey, &wall_time)) {
+    return FmtStatus("unable to decode timestamp.wall_time");
+  }
+  uint32_t logical;
+  if (!DecodeUint32Decreasing(&encodedKey, &logical)) {
+    return FmtStatus("unable to decode timestamp.logical");
+  }
+  *ts = Timestamp(int64_t(wall_time), int32_t(logical));
+  return kSuccess;
+}
+
 }  // namespace
 
 DBStatus DBOpen(DBEngine **db, DBSlice dir, DBOptions db_opts) {
   // Divide the cache space into two levels: the fast row cache
   // and the slower but more space-efficient block cache.
   // TODO(bdarnell): do we need both? how much of each?
-  const auto row_cache_size = db_opts.cache_size / 2;
+  const auto row_cache_size = 0 * db_opts.cache_size / 2;
   const auto block_cache_size = db_opts.cache_size - row_cache_size;
   const int num_cache_shard_bits = 4;
   rocksdb::BlockBasedTableOptions table_options;
@@ -1107,7 +1204,7 @@ DBStatus DBOpen(DBEngine **db, DBSlice dir, DBOptions db_opts) {
     options.env = memenv.get();
   }
 
-  rocksdb::DB *db_ptr;
+  rocksdb::DB* db_ptr;
   rocksdb::Status status = rocksdb::DB::Open(options, ToString(dir), &db_ptr);
   if (!status.ok()) {
     return ToDBStatus(status);
@@ -1270,32 +1367,27 @@ DBEngine* DBNewBatch(DBEngine *db) {
   return new DBBatch(db);
 }
 
-DBIterator* DBImpl::NewIter() {
-  DBIterator* iter = new DBIterator;
-  iter->rep.reset(rep->NewIterator(read_opts));
-  return iter;
+rocksdb::Iterator* DBImpl::NewIter() {
+  return rep->NewIterator(read_opts);
 }
 
-DBIterator* DBBatch::NewIter() {
-  DBIterator* iter = new DBIterator;
+rocksdb::Iterator* DBBatch::NewIter() {
   rocksdb::Iterator* base = rep->NewIterator(read_opts);
   if (updates == 0) {
-    iter->rep.reset(base);
-  } else {
-    rocksdb::WBWIIterator* delta = batch.NewIterator();
-    iter->rep.reset(new BaseDeltaIterator(base, delta));
+    return base;
   }
-  return iter;
+  rocksdb::WBWIIterator* delta = batch.NewIterator();
+  return new BaseDeltaIterator(base, delta);
 }
 
-DBIterator* DBSnapshot::NewIter() {
-  DBIterator* iter = new DBIterator;
-  iter->rep.reset(rep->NewIterator(read_opts));
-  return iter;
+rocksdb::Iterator* DBSnapshot::NewIter() {
+  return rep->NewIterator(read_opts);
 }
 
 DBIterator* DBNewIter(DBEngine* db) {
-  return db->NewIter();
+  DBIterator* iter = new DBIterator;
+  iter->rep.reset(db->NewIter());
+  return iter;
 }
 
 void DBIterDestroy(DBIterator* iter) {
@@ -1352,8 +1444,6 @@ DBStatus DBMergeOne(DBSlice existing, DBSlice update, DBString* new_value) {
 
 MVCCStatsResult MVCCComputeStats(
     DBIterator* iter, DBSlice start, DBSlice end, int64_t now_nanos) {
-  const int mvcc_version_timestamp_size = 12;
-
   MVCCStatsResult stats;
   memset(&stats, 0, sizeof(stats));
 
@@ -1454,4 +1544,187 @@ MVCCStatsResult MVCCComputeStats(
   }
 
   return stats;
+}
+
+MVCCGetResult MVCCGet(
+    DBEngine* db, DBSlice key, MVCCTimestamp mvcc_timestamp,
+    bool consistent, MVCCTxn txn) {
+  Timestamp timestamp(mvcc_timestamp);
+
+  MVCCGetResult r;
+  memset(&r, 0, sizeof(r));
+
+  if (!consistent && txn.id.len == 0) {
+    r.status = FmtStatus("cannot allow inconsistent reads within a transaction");
+    return r;
+  }
+
+  std::string meta_key;
+  EncodeBytes(&meta_key, key.data, key.len);
+
+  DBString meta_value;
+  r.status = db->Get(ToDBSlice(meta_key), &meta_value);
+  if (r.status.data != NULL || meta_value.len == 0) {
+    return r;
+  }
+
+  cockroach::storage::engine::MVCCMetadata meta;
+  if (!meta.ParseFromArray(meta_value.data, meta_value.len)) {
+    free(meta_value.data);
+    r.status = FmtStatus("unable to decode MVCCMetadata");
+    return r;
+  }
+  free(meta_value.data);
+
+  if (meta.has_value()) {
+    // Value is inline, return immediately; txn & timestamp are irrelevant.
+    const std::string s = meta.value().SerializeAsString();
+    r.buf = ToDBString(s);
+    r.value = ToDBSlice(r.buf);
+    return r;
+  }
+
+  std::string result_buf;
+  std::pair<int, int> txn_info;
+  if (!consistent && meta.has_txn() && timestamp >= meta.timestamp()) {
+    txn_info = AppendProto(&result_buf, meta.txn());
+    timestamp = Timestamp(meta.timestamp()).Prev();
+  }
+
+  const bool own_intent = IsIntentOf(&meta, &txn);
+  if (timestamp >= meta.timestamp() && meta.has_txn() && !own_intent) {
+    // Trying to read the last value, but it's another transaction's intent;
+    // the reader will have to act on this.
+    r.error = MVCC_WRITE_INTENT_ERROR;
+    if (txn_info.second == 0) {
+      txn_info = AppendProto(&result_buf, meta.txn());
+    }
+    r.buf = ToDBString(result_buf);
+    r.txn = DBSliceSubstr(r.buf, txn_info);
+    return r;
+  }
+
+  std::unique_ptr<rocksdb::Iterator> iter;
+  bool check_value_timestamp = false;
+
+  std::string value_mvcc_key_buf;
+  std::string value_buf;
+  rocksdb::Slice value_mvcc_key;
+  rocksdb::Slice value;
+
+  if (timestamp >= meta.timestamp() || own_intent) {
+    // We are reading the latest value, which is either an intent written by
+    // this transaction or not an intent at all (so there's no conflict). Note
+    // that when reading the own intent, the timestamp specified is irrelevant;
+    // we always want to see the intent (see TestMVCCReadWithPushedTimestamp).
+    std::string latest_key = meta_key;
+    MVCCEncodeTimestamp(&latest_key, meta.timestamp());
+
+    if (own_intent && txn.epoch != meta.txn().epoch()) {
+      if (txn.epoch < meta.txn().epoch()) {
+        r.status = FmtStatus("failed to read with epoch %d due to a write intent with epoch %d",
+                             txn.epoch, meta.txn().epoch());
+        return r;
+      }
+      // Skip over the latest key as it is from a different (earlier) epoch.
+      KeyNext(&latest_key);
+      iter.reset(db->NewIter());
+      iter->Seek(latest_key);
+    } else {
+      std::swap(value_mvcc_key_buf, latest_key);
+      value_mvcc_key = value_mvcc_key_buf;
+
+      DBString tmp;
+      r.status = db->Get(ToDBSlice(value_mvcc_key_buf), &tmp);
+      if (r.status.data == NULL && tmp.data != NULL) {
+        value_buf.append(tmp.data, tmp.len);
+        free(tmp.data);
+        value = value_buf;
+      }
+    }
+  } else if (txn.id.len != 0 && timestamp < txn.max_timestamp) {
+    // In this branch, the latest timestamp is ahead, and so the read of an
+    // "old" value in a transactional context at time (timestamp, MaxTimestamp]
+    // occurs, leading to a clock uncertainty error if a version exists in that
+    // time interval.
+    if (Timestamp(meta.timestamp()) >= txn.max_timestamp) {
+      // Second case: Our read timestamp is behind the latest write, but the
+      // latest write could possibly have happened before our read in
+      // absolute time if the writer had a fast clock.  The reader should try
+      // again with a later timestamp than the one given below.
+      r.error = MVCC_READ_WITHIN_UNCERTAINTY_INTERVAL_ERROR;
+      r.uncertainty_timestamp = timestamp;
+      r.uncertainty_existing_timestamp = Timestamp(meta.timestamp());
+      return r;
+    }
+
+    // We want to know if anything has been written ahead of timestamp, but
+    // before MaxTimestamp.
+    std::string latest_key = meta_key;
+    MVCCEncodeTimestamp(&latest_key, txn.max_timestamp);
+    iter.reset(db->NewIter());
+    iter->Seek(latest_key);
+    check_value_timestamp = true;
+  } else {
+    // Fifth case: We're reading a historic value either outside of a
+    // transaction, or in the absence of future versions that clock uncertainty
+    // would apply to.
+    std::string latest_key = meta_key;
+    MVCCEncodeTimestamp(&latest_key, timestamp);
+    iter.reset(db->NewIter());
+    iter->Seek(latest_key);
+  }
+
+  if (iter.get() && iter->Valid()) {
+    value_mvcc_key = iter->key();
+    value = iter->value();
+  }
+  if (value_mvcc_key.empty()) {
+    r.buf = ToDBString(result_buf);
+    r.txn = DBSliceSubstr(r.buf, txn_info);
+    return r;
+  }
+
+  std::string value_key;
+  Timestamp value_timestamp(0, 0);
+  r.status = MVCCDecodeKey(value_mvcc_key, &value_key, &value_timestamp);
+  if (r.status.data != NULL) {
+    return r;
+  }
+  if (value_key != ToSlice(key)) {
+    r.buf = ToDBString(result_buf);
+    r.txn = DBSliceSubstr(r.buf, txn_info);
+    return r;
+  }
+
+  if (value_timestamp.IsZero()) {
+    r.status = FmtStatus("expected versioned value");
+    return r;
+  }
+
+  if (check_value_timestamp) {
+    if (timestamp < value_timestamp) {
+      // Third case: Our read timestamp is sufficiently behind the newest value,
+      // but there is another previous write with the same issues as in the
+      // second case, so the reader will have to come again with a higher read
+      // timestamp.
+      r.error = MVCC_READ_WITHIN_UNCERTAINTY_INTERVAL_ERROR;
+      r.uncertainty_timestamp = timestamp;
+      r.uncertainty_existing_timestamp = value_timestamp;
+      return r;
+    }
+    // Fourth case: There's no value in our future up to MaxTimestamp, and
+    // those are the only ones that we're not certain about. The correct key
+    // has already been read above, so there's nothing left to do.
+  }
+
+  std::pair<int, int> value_info;
+  value_info.first = result_buf.size();
+  result_buf.append(value.data(), value.size());
+  value_info.second = result_buf.size();
+  r.buf = ToDBString(result_buf);
+  r.value = DBSliceSubstr(r.buf, value_info);
+  r.txn = DBSliceSubstr(r.buf, txn_info);
+  r.value_timestamp = value_timestamp;
+  return r;
 }

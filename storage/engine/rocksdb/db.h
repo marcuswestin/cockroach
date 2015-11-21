@@ -168,6 +168,41 @@ typedef struct {
 
 MVCCStatsResult MVCCComputeStats(DBIterator* iter, DBSlice start, DBSlice end, int64_t now_nanos);
 
+typedef struct {
+  int64_t wall_time;
+  int32_t logical;
+} MVCCTimestamp;
+
+typedef enum {
+  MVCC_SUCCESS,
+  MVCC_WRITE_INTENT_ERROR,
+  MVCC_READ_WITHIN_UNCERTAINTY_INTERVAL_ERROR,
+} MVCCError;
+
+typedef struct {
+  DBStatus status;
+  MVCCError error;
+  MVCCTimestamp uncertainty_timestamp;
+  MVCCTimestamp uncertainty_existing_timestamp;
+  MVCCTimestamp value_timestamp;
+  bool exists;
+  // A buffer of C allocated memory that must be freed by the caller.
+  DBString buf;
+  // The encoded Value.
+  DBSlice value;
+  // The encoded Transaction if an intent was present.
+  DBSlice txn;
+} MVCCGetResult;
+
+typedef struct {
+  DBSlice id;
+  MVCCTimestamp max_timestamp;
+  uint32_t epoch;
+} MVCCTxn;
+
+MVCCGetResult MVCCGet(DBEngine* db, DBSlice key, MVCCTimestamp timestamp,
+                      bool consistent, MVCCTxn txn);
+
 #ifdef __cplusplus
 }  // extern "C"
 #endif

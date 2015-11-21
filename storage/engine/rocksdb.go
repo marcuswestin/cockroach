@@ -283,6 +283,12 @@ func (r *RocksDB) Defer(func()) {
 	panic("only implemented for rocksDBBatch")
 }
 
+// MVCCGet fast path for RocksDB.
+func (r *RocksDB) MVCCGet(key roachpb.Key, timestamp roachpb.Timestamp, consistent bool,
+	txn *roachpb.Transaction) (*roachpb.Value, []roachpb.Intent, error) {
+	return dbMVCCGet(r.rdb, key, timestamp, consistent, txn)
+}
+
 type rocksDBSnapshot struct {
 	parent *RocksDB
 	handle *C.DBEngine
@@ -784,4 +790,84 @@ func dbIterate(rdb *C.DBEngine, start, end MVCCKey,
 	}
 	// Check for any errors during iteration.
 	return it.Error()
+}
+
+func dbMVCCGet(rdb *C.DBEngine, key roachpb.Key, timestamp roachpb.Timestamp, consistent bool,
+	txn *roachpb.Transaction) (*roachpb.Value, []roachpb.Intent, error) {
+	var ctxn C.MVCCTxn
+	if txn != nil {
+		ctxn.id = goToCSlice(txn.ID)
+		ctxn.max_timestamp.wall_time = C.int64_t(txn.Timestamp.WallTime)
+		ctxn.max_timestamp.logical = C.int32_t(txn.Timestamp.Logical)
+		ctxn.epoch = C.uint32_t(txn.Epoch)
+	}
+	r := C.MVCCGet(rdb, goToCSlice(key),
+		C.MVCCTimestamp{
+			wall_time: C.int64_t(timestamp.WallTime),
+			logical:   C.int32_t(timestamp.Logical),
+		},
+		C.bool(consistent), ctxn)
+	defer C.free(unsafe.Pointer(r.buf.data))
+
+	if err := statusToError(r.status); err != nil {
+		return nil, nil, err
+	}
+
+	var ignoredIntents []roachpb.Intent
+	if txnData := cSliceToUnsafeGoBytes(r.txn); txnData != nil {
+		intentTxn := &roachpb.Transaction{}
+		if err := proto.Unmarshal(txnData, intentTxn); err != nil {
+			return nil, nil, err
+		}
+		ignoredIntents = append(ignoredIntents,
+			roachpb.Intent{Span: roachpb.Span{Key: key}, Txn: *intentTxn})
+	}
+
+	switch r.error {
+	case C.MVCC_SUCCESS:
+	case C.MVCC_WRITE_INTENT_ERROR:
+		return nil, nil, &roachpb.WriteIntentError{Intents: ignoredIntents}
+	case C.MVCC_READ_WITHIN_UNCERTAINTY_INTERVAL_ERROR:
+		return nil, nil, &roachpb.ReadWithinUncertaintyIntervalError{
+			Timestamp: roachpb.Timestamp{
+				WallTime: int64(r.uncertainty_timestamp.wall_time),
+				Logical:  int32(r.uncertainty_timestamp.logical),
+			},
+			ExistingTimestamp: roachpb.Timestamp{
+				WallTime: int64(r.uncertainty_existing_timestamp.wall_time),
+				Logical:  int32(r.uncertainty_existing_timestamp.logical),
+			},
+		}
+	}
+
+	var value *MVCCValue
+	if data := cSliceToUnsafeGoBytes(r.value); data != nil {
+		value = &MVCCValue{}
+		if err := proto.Unmarshal(data, value); err != nil {
+			return nil, nil, err
+		}
+	} else {
+		return nil, ignoredIntents, nil
+	}
+	if value.Deleted {
+		value.Value = nil
+	}
+
+	if value.Value != nil {
+		if r.value_timestamp.wall_time != 0 || r.value_timestamp.logical != 0 {
+			value.Value.Timestamp = &roachpb.Timestamp{
+				WallTime: int64(r.value_timestamp.wall_time),
+				Logical:  int32(r.value_timestamp.logical),
+			}
+		}
+		if err := value.Value.Verify(key); err != nil {
+			return nil, nil, err
+		}
+	} else if !value.Deleted {
+		// Sanity check.
+		panic(fmt.Sprintf("encountered MVCC value at key %s with a nil roachpb.Value but with !Deleted: %+v",
+			key, value))
+	}
+
+	return value.Value, ignoredIntents, nil
 }
