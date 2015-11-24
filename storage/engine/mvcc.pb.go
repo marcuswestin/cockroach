@@ -39,11 +39,7 @@ type MVCCMetadata struct {
 	KeyBytes int64 `protobuf:"varint,4,opt,name=key_bytes" json:"key_bytes"`
 	// The size in bytes of the most recent versioned value.
 	ValBytes int64 `protobuf:"varint,5,opt,name=val_bytes" json:"val_bytes"`
-	// Inline value, used for values with zero timestamp. This provides
-	// an efficient short circuit of the normal MVCC metadata sentinel
-	// and subsequent version rows. If timestamp == (0, 0), then there
-	// is only a single MVCC metadata row with value inlined, and with
-	// empty timestamp, key_bytes, and val_bytes.
+	// Inline value.
 	Value *cockroach_roachpb1.Value `protobuf:"bytes,6,opt,name=value" json:"value,omitempty"`
 }
 

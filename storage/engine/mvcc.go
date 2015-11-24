@@ -503,6 +503,7 @@ func MVCCGet(engine Engine, key roachpb.Key, timestamp roachpb.Timestamp, consis
 		*value = buf.value
 		buf.value.Reset()
 	}
+	buf.meta.Reset()
 	return value, intents, err
 }
 
@@ -530,6 +531,8 @@ func mvccGetInternal(iter Iterator, key roachpb.Key, metaKey MVCCKey,
 		if err := meta.Value.Verify(key); err != nil {
 			return nil, nil, err
 		}
+		meta.Value.Timestamp = &roachpb.Timestamp{}
+		*meta.Value.Timestamp = meta.Timestamp
 		return meta.Value, nil, nil
 	}
 	var ignoredIntents []roachpb.Intent
@@ -730,7 +733,7 @@ func mvccPutInternal(engine Engine, ms *MVCCStats, key roachpb.Key, timestamp ro
 	}
 
 	// Verify we're not mixing inline and non-inline values.
-	putIsInline := timestamp.Equal(roachpb.ZeroTimestamp)
+	putIsInline := timestamp.Equal(roachpb.ZeroTimestamp) || !ok
 	if ok && putIsInline != buf.meta.IsInline() {
 		return util.Errorf("%q: put is inline=%t, but existing value is inline=%t",
 			metaKey, putIsInline, buf.meta.IsInline())
@@ -740,7 +743,7 @@ func mvccPutInternal(engine Engine, ms *MVCCStats, key roachpb.Key, timestamp ro
 		if value == nil {
 			metaKeySize, metaValSize, err = 0, 0, engine.Clear(metaKey)
 		} else {
-			buf.meta = MVCCMetadata{Value: value}
+			buf.meta = MVCCMetadata{Timestamp: timestamp, Value: value}
 			metaKeySize, metaValSize, err = PutProto(engine, metaKey, &buf.meta)
 		}
 		updateStatsForInline(ms, key, origMetaKeySize, origMetaValSize, metaKeySize, metaValSize)
