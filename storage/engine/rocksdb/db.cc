@@ -25,8 +25,10 @@
 #include "rocksdb/compaction_filter.h"
 #include "rocksdb/db.h"
 #include "rocksdb/env.h"
+#include "rocksdb/filter_policy.h"
 #include "rocksdb/merge_operator.h"
 #include "rocksdb/options.h"
+#include "rocksdb/slice_transform.h"
 #include "rocksdb/table.h"
 #include "rocksdb/utilities/write_batch_with_index.h"
 #include "cockroach/roachpb/api.pb.h"
@@ -58,7 +60,7 @@ struct DBEngine {
 struct DBImpl : public DBEngine {
   std::unique_ptr<rocksdb::Env> memenv;
   std::unique_ptr<rocksdb::DB> rep_deleter;
-  rocksdb::ReadOptions const read_opts;
+  rocksdb::ReadOptions read_opts;
 
   // Construct a new DBImpl from the specified DB and Env. Both the DB
   // and Env will be deleted when the DBImpl is deleted. It is ok to
@@ -67,6 +69,7 @@ struct DBImpl : public DBEngine {
       : DBEngine(r),
         memenv(m),
         rep_deleter(r) {
+    read_opts.total_order_seek = true;
   }
   virtual ~DBImpl() {
   }
@@ -82,11 +85,12 @@ struct DBImpl : public DBEngine {
 struct DBBatch : public DBEngine {
   int updates;
   rocksdb::WriteBatchWithIndex batch;
-  rocksdb::ReadOptions const read_opts;
+  rocksdb::ReadOptions read_opts;
 
   DBBatch(DBEngine* db)
       : DBEngine(db->rep),
         updates(0) {
+    read_opts.total_order_seek = true;
   }
   virtual ~DBBatch() {
   }
@@ -107,6 +111,7 @@ struct DBSnapshot : public DBEngine {
       : DBEngine(db->rep),
         snapshot(db->rep->GetSnapshot()) {
     read_opts.snapshot = snapshot;
+    read_opts.total_order_seek = true;
   }
   virtual ~DBSnapshot() {
     rep->ReleaseSnapshot(snapshot);
@@ -322,6 +327,38 @@ class DBCompactionFilterFactory : public rocksdb::CompactionFilterFactory {
  private:
   google::protobuf::Mutex mu_; // Protects values below.
   int64_t min_txn_ts_;
+};
+
+class DBPrefixExtractor : public rocksdb::SliceTransform {
+ public:
+  DBPrefixExtractor() {
+  }
+
+  virtual const char* Name() const {
+    return "cockroach_prefix_extractor";
+  }
+
+  // MVCC keys are encoded as <user-key>/<timestamp>. Extract the <user-key>
+  // prefix which will allow for more efficient iteration over the keys
+  // matching a particular <user-key>. Specifically, the <user-key> will be
+  // added to the per table bloom filters and will this be able to skip tables
+  // which do not contain the <user-key>.
+  virtual rocksdb::Slice Transform(const rocksdb::Slice& src) const {
+    const char kTerm[] = "\x00\xff";
+    const char* p = reinterpret_cast<const char*>(memmem(src.data(), src.size(), kTerm, sizeof(kTerm)));
+    if (!p) {
+      return src;
+    }
+    return rocksdb::Slice(src.data(), p - src.data());
+  }
+
+  virtual bool InDomain(const rocksdb::Slice& src) const {
+    return true;
+  }
+
+  virtual bool InRange(const rocksdb::Slice& dst) const {
+    return Transform(dst) == dst;
+  }
 };
 
 bool WillOverflow(int64_t a, int64_t b) {
@@ -1089,6 +1126,7 @@ DBStatus DBOpen(DBEngine **db, DBSlice dir, DBOptions db_opts) {
     table_options.block_cache = rocksdb::NewLRUCache(
         block_cache_size, num_cache_shard_bits);
   }
+  table_options.filter_policy.reset(rocksdb::NewBloomFilterPolicy(10));
 
   rocksdb::Options options;
   options.allow_os_buffer = db_opts.allow_os_buffer;
@@ -1097,6 +1135,7 @@ DBStatus DBOpen(DBEngine **db, DBSlice dir, DBOptions db_opts) {
   options.create_if_missing = true;
   options.info_log.reset(new DBLogger(db_opts.logging_enabled));
   options.merge_operator.reset(new DBMergeOperator);
+  options.prefix_extractor.reset(new DBPrefixExtractor);
   options.table_factory.reset(rocksdb::NewBlockBasedTableFactory(table_options));
   options.write_buffer_size = 64 << 20;           // 64 MB
   options.target_file_size_base = 64 << 20;       // 64 MB
